@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Crazy Time Telegram Bot — Render-compatible
-- Polls Crazy Time API every 10 seconds, posts new results to channel
-- Every 30 minutes sends a promo message, pins it, deletes the previous one
-- Runs a tiny HTTP health-check server so Render free plan stays alive
+Crazy Time Telegram Bot — Render-compatible (Flask + gunicorn)
+- Flask web server on main thread (Render detects port correctly via gunicorn)
+- Polling loop + promo loop run as background daemon threads
+- Pinger (cron-job.org or UptimeRobot) hits / every 14 min to prevent sleep
 """
 
 import os
@@ -11,15 +11,14 @@ import time
 import logging
 import threading
 import requests
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 BOT_TOKEN      = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHANNEL_ID     = os.environ.get("TELEGRAM_CHANNEL_ID", "")
-PORT           = int(os.environ.get("PORT", 8080))
 API_URL        = "https://api.casinoscores.com/svc-evolution-game-events/api/crazytime/latest"
-POLL_INTERVAL  = 10          # seconds between API polls
-PROMO_INTERVAL = 30 * 60     # 30 minutes in seconds
+POLL_INTERVAL  = 10        # seconds between API polls
+PROMO_INTERVAL = 30 * 60   # 30 minutes
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -28,6 +27,13 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+# ── Flask app (health endpoint) ────────────────────────────────────────────────
+app = Flask(__name__)
+
+@app.route("/")
+def health():
+    return "OK - Crazy Time bot is running", 200
 
 # ── Sector mappings ────────────────────────────────────────────────────────────
 SECTOR_LABEL = {
@@ -38,7 +44,7 @@ SECTOR_LABEL = {
     "cashhunt":   "Cash Hunt",
     "coinflip":   "Coin Flip",
     "crazytime":  "Crazy Time",
-    "crazybonus": "Crazy Time",   # API alias
+    "crazybonus": "Crazy Time",
     "pachinko":   "Pachinko",
 }
 BONUS_SECTORS = {"cashhunt", "coinflip", "crazytime", "crazybonus", "pachinko"}
@@ -59,17 +65,15 @@ def fmt(value, decimals=3) -> str:
     except (TypeError, ValueError):
         return str(value)
 
-# ── HTML escaping (safe for Telegram HTML parse mode) ─────────────────────────
+# ── HTML helpers ───────────────────────────────────────────────────────────────
 def esc(text: str) -> str:
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def b(text: str) -> str:
-    """Wrap text in HTML bold tags."""
     return f"<b>{esc(text)}</b>"
 
-# ── Message builder (HTML) ────────────────────────────────────────────────────
+# ── Message builder ────────────────────────────────────────────────────────────
 def build_message(payload: dict) -> str:
-    # Top-level fields
     total_winners = payload.get("totalWinners")
     total_amount  = payload.get("totalAmount")
 
@@ -126,7 +130,6 @@ def tg(method: str, **kwargs) -> dict | None:
         return None
 
 def send_message(text: str, parse_mode: str = "HTML") -> int | None:
-    """Send a message, return message_id or None."""
     resp = tg("sendMessage", chat_id=CHANNEL_ID, text=text, parse_mode=parse_mode,
               disable_web_page_preview=True)
     if resp:
@@ -162,17 +165,12 @@ def fetch_latest() -> dict | None:
 
 # ── Promo loop ─────────────────────────────────────────────────────────────────
 def promo_loop():
-    """Every 30 minutes: send promo, pin it, delete the previous promo."""
     log.info("📢 Promo loop started  |  interval=%sm", PROMO_INTERVAL // 60)
     last_promo_id = None
-
     while True:
         time.sleep(PROMO_INTERVAL)
-
-        # Send new promo using HTML so the hyperlink works cleanly
         text = '🎰 Play Crazy Time on <a href="https://roobet.com/?ref=aittam">Roobet</a>'
-        msg_id = send_message(text, parse_mode="HTML")
-
+        msg_id = send_message(text)
         if msg_id:
             pin_message(msg_id)
             if last_promo_id:
@@ -183,7 +181,6 @@ def promo_loop():
 def polling_loop():
     log.info("🎰 Polling loop started  |  channel=%s  |  interval=%ss", CHANNEL_ID, POLL_INTERVAL)
     last_id = None
-
     while True:
         payload = fetch_latest()
         if payload:
@@ -200,29 +197,18 @@ def polling_loop():
                 log.debug("No new round (id=%s)", game_id)
         time.sleep(POLL_INTERVAL)
 
-# ── Health-check HTTP server ───────────────────────────────────────────────────
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK - Crazy Time bot is running")
-
-    def log_message(self, format, *args):
-        pass  # silence access logs
-
-# ── Entry point ────────────────────────────────────────────────────────────────
-def main():
-    if not BOT_TOKEN:
-        raise SystemExit("❌  Set TELEGRAM_BOT_TOKEN environment variable.")
-    if not CHANNEL_ID:
-        raise SystemExit("❌  Set TELEGRAM_CHANNEL_ID environment variable.")
-
+# ── Start background threads before gunicorn forks ────────────────────────────
+def start_background_threads():
+    if not BOT_TOKEN or not CHANNEL_ID:
+        log.warning("⚠️  BOT_TOKEN or CHANNEL_ID not set — threads not started.")
+        return
     threading.Thread(target=polling_loop, daemon=True).start()
     threading.Thread(target=promo_loop,   daemon=True).start()
+    log.info("🚀 Background threads started.")
 
-    log.info("🌐 Health server listening on port %s", PORT)
-    HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
+start_background_threads()
 
+# ── Local dev entry point ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)

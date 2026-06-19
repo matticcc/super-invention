@@ -4,9 +4,9 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
+    startCommand: gunicorn bot:app --bind 0.0.0.0:$PORT --workers 1 --threads 2
     envVars:
       - key: TELEGRAM_BOT_TOKEN
-        sync: false          # you fill this in Render dashboard
+        sync: false
       - key: TELEGRAM_CHANNEL_ID
-        sync: false          # you fill this in Render dashboard
+        sync: false
