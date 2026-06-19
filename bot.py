@@ -35,12 +35,13 @@ SECTOR_LABEL = {
     "2": "2", "two": "2",
     "5": "5", "five": "5",
     "10": "10", "ten": "10",
-    "cashhunt":  "Cash Hunt",
-    "coinflip":  "Coin Flip",
-    "crazytime": "Crazy Time",
-    "pachinko":  "Pachinko",
+    "cashhunt":   "Cash Hunt",
+    "coinflip":   "Coin Flip",
+    "crazytime":  "Crazy Time",
+    "crazybonus": "Crazy Time",   # API alias
+    "pachinko":   "Pachinko",
 }
-BONUS_SECTORS = {"cashhunt", "coinflip", "crazytime", "pachinko"}
+BONUS_SECTORS = {"cashhunt", "coinflip", "crazytime", "crazybonus", "pachinko"}
 
 def label(raw: str) -> str:
     return SECTOR_LABEL.get(raw.lower().strip(), raw)
@@ -58,24 +59,15 @@ def fmt(value, decimals=3) -> str:
     except (TypeError, ValueError):
         return str(value)
 
-# ── MarkdownV2 escaping ────────────────────────────────────────────────────────
-_MD_SPECIAL = set(r"\_[]()~`>#+=|{}.!")
-
+# ── HTML escaping (safe for Telegram HTML parse mode) ─────────────────────────
 def esc(text: str) -> str:
-    out, i, s = [], 0, str(text)
-    while i < len(s):
-        ch = s[i]
-        if ch == "\\" and i + 1 < len(s):
-            out.append(ch); out.append(s[i + 1]); i += 2
-        elif ch == "*":
-            out.append(ch); i += 1
-        elif ch in _MD_SPECIAL:
-            out.append("\\"); out.append(ch); i += 1
-        else:
-            out.append(ch); i += 1
-    return "".join(out)
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# ── Message builder ────────────────────────────────────────────────────────────
+def b(text: str) -> str:
+    """Wrap text in HTML bold tags."""
+    return f"<b>{esc(text)}</b>"
+
+# ── Message builder (HTML) ────────────────────────────────────────────────────
 def build_message(payload: dict) -> str:
     # Top-level fields
     total_winners = payload.get("totalWinners")
@@ -97,31 +89,29 @@ def build_message(payload: dict) -> str:
     bonus    = is_bonus(wh_sector)
 
     ts_str         = f"{esc(ts_label)} ×{ts_mult}" if ts_mult else esc(ts_label)
-    matched_suffix = "" if matched else " \\(missed\\)"
+    matched_suffix = "" if matched else " (missed)"
 
     header = (
-        f"🎯 *{esc(wh_label)}* – BONUS hit\\!"
+        f"🎯 {b(wh_label)} – BONUS hit!"
         if bonus else
-        f"🎯 *{esc(wh_label)}* – Number hit\\!"
+        f"🎯 {b(wh_label)} – Number hit!"
     )
 
     lines = [
         header,
-        f"• *Segment:* {esc(wh_label)}",
-        f"• *Top Slot:* {ts_str}{matched_suffix}",
+        f"• {b('Segment:')} {esc(wh_label)}",
+        f"• {b('Top Slot:')} {ts_str}{matched_suffix}",
     ]
     if total_winners is not None:
-        lines.append(f"• *Total winners:* {esc(fmt(total_winners, 0))}")
+        lines.append(f"• {b('Total winners:')} {esc(fmt(total_winners, 0))}")
     if total_amount is not None:
-        lines.append(f"• *Total amount:* € {esc(fmt(total_amount))}")
+        lines.append(f"• {b('Total amount:')} € {esc(fmt(total_amount))}")
     if bonus and max_mult and max_mult > 1:
-        lines.append(f"• *Multiplier:* {esc(str(max_mult))}x")
+        lines.append(f"• {b('Multiplier:')} {esc(str(max_mult))}x")
 
     return "\n".join(lines)
 
 # ── Telegram API helpers ───────────────────────────────────────────────────────
-TG_BASE = f"https://api.telegram.org/bot{{token}}"
-
 def tg(method: str, **kwargs) -> dict | None:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
     try:
@@ -135,7 +125,7 @@ def tg(method: str, **kwargs) -> dict | None:
         log.error("Network error on %s: %s", method, e)
         return None
 
-def send_message(text: str, parse_mode: str = "MarkdownV2") -> int | None:
+def send_message(text: str, parse_mode: str = "HTML") -> int | None:
     """Send a message, return message_id or None."""
     resp = tg("sendMessage", chat_id=CHANNEL_ID, text=text, parse_mode=parse_mode,
               disable_web_page_preview=True)
