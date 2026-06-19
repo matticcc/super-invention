@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: crazytime-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false          # you fill this in Render dashboard
+      - key: TELEGRAM_CHANNEL_ID
+        sync: false          # you fill this in Render dashboard
