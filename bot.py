@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
 Crazy Time Telegram Bot — Render-compatible
-Runs a tiny HTTP health-check server on PORT so Render keeps the
-service alive, while the polling loop runs in a background thread.
+- Polls Crazy Time API every 10 seconds, posts new results to channel
+- Every 30 minutes sends a promo message, pins it, deletes the previous one
+- Runs a tiny HTTP health-check server so Render free plan stays alive
 """
 
 import os
 import time
-import json
 import logging
 import threading
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-BOT_TOKEN     = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHANNEL_ID    = os.environ.get("TELEGRAM_CHANNEL_ID", "")
-PORT          = int(os.environ.get("PORT", 8080))   # Render injects PORT
-API_URL       = "https://api.casinoscores.com/svc-evolution-game-events/api/crazytime/latest"
-POLL_INTERVAL = 30   # seconds between polls
+BOT_TOKEN      = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHANNEL_ID     = os.environ.get("TELEGRAM_CHANNEL_ID", "")
+PORT           = int(os.environ.get("PORT", 8080))
+API_URL        = "https://api.casinoscores.com/svc-evolution-game-events/api/crazytime/latest"
+POLL_INTERVAL  = 10          # seconds between API polls
+PROMO_INTERVAL = 30 * 60     # 30 minutes in seconds
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -47,7 +48,7 @@ def label(raw: str) -> str:
 def is_bonus(raw: str) -> bool:
     return raw.lower().strip() in BONUS_SECTORS
 
-# ── Number formatting (EU style) ───────────────────────────────────────────────
+# ── Number formatting (EU style: 1.234,56) ────────────────────────────────────
 def fmt(value, decimals=3) -> str:
     try:
         f = float(value)
@@ -76,21 +77,20 @@ def esc(text: str) -> str:
 
 # ── Message builder ────────────────────────────────────────────────────────────
 def build_message(payload: dict) -> str:
+    # Top-level fields
+    total_winners = payload.get("totalWinners")
+    total_amount  = payload.get("totalAmount")
+
     data      = payload.get("data", payload)
     result    = data.get("result", {}).get("outcome", {})
     top_slot  = result.get("topSlot", {})
     wheel_res = result.get("wheelResult", {})
 
-    ts_sector  = top_slot.get("wheelSector", "?")
-    ts_mult    = top_slot.get("multiplier")
-    wh_sector  = wheel_res.get("wheelSector", "?")
-    matched    = result.get("isTopSlotMatchedToWheelResult", False)
-    max_mult   = result.get("maxMultiplier")
-
-    participants = data.get("numOfParticipants")
-    payout       = data.get("payout")
-    wager        = data.get("wager")
-    amount       = payout if payout else wager
+    ts_sector = top_slot.get("wheelSector", "?")
+    ts_mult   = top_slot.get("multiplier")
+    wh_sector = wheel_res.get("wheelSector", "?")
+    matched   = result.get("isTopSlotMatchedToWheelResult", False)
+    max_mult  = result.get("maxMultiplier")
 
     wh_label = label(wh_sector)
     ts_label = label(ts_sector)
@@ -110,32 +110,55 @@ def build_message(payload: dict) -> str:
         f"• *Segment:* {esc(wh_label)}",
         f"• *Top Slot:* {ts_str}{matched_suffix}",
     ]
-    if participants is not None:
-        lines.append(f"• *Total winners:* {esc(fmt(participants, 0))}")
-    if amount is not None:
-        lines.append(f"• *Total amount:* € {esc(fmt(amount))}")
+    if total_winners is not None:
+        lines.append(f"• *Total winners:* {esc(fmt(total_winners, 0))}")
+    if total_amount is not None:
+        lines.append(f"• *Total amount:* € {esc(fmt(total_amount))}")
     if bonus and max_mult and max_mult > 1:
         lines.append(f"• *Multiplier:* {esc(str(max_mult))}x")
 
     return "\n".join(lines)
 
-# ── Telegram sender ────────────────────────────────────────────────────────────
-def send_message(text: str) -> bool:
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+# ── Telegram API helpers ───────────────────────────────────────────────────────
+TG_BASE = f"https://api.telegram.org/bot{{token}}"
+
+def tg(method: str, **kwargs) -> dict | None:
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
     try:
-        r = requests.post(
-            url,
-            json={"chat_id": CHANNEL_ID, "text": text, "parse_mode": "MarkdownV2"},
-            timeout=10,
-        )
-        if r.status_code == 200:
-            log.info("✅ Message posted.")
-            return True
-        log.error("Telegram error %s: %s", r.status_code, r.text)
-        return False
+        r = requests.post(url, json=kwargs, timeout=10)
+        data = r.json()
+        if not data.get("ok"):
+            log.error("Telegram %s error: %s", method, data)
+            return None
+        return data
     except requests.RequestException as e:
-        log.error("Network error sending: %s", e)
-        return False
+        log.error("Network error on %s: %s", method, e)
+        return None
+
+def send_message(text: str, parse_mode: str = "MarkdownV2") -> int | None:
+    """Send a message, return message_id or None."""
+    resp = tg("sendMessage", chat_id=CHANNEL_ID, text=text, parse_mode=parse_mode,
+              disable_web_page_preview=True)
+    if resp:
+        msg_id = resp["result"]["message_id"]
+        log.info("✅ Message sent (id=%s)", msg_id)
+        return msg_id
+    return None
+
+def pin_message(message_id: int) -> bool:
+    resp = tg("pinChatMessage", chat_id=CHANNEL_ID, message_id=message_id,
+              disable_notification=True)
+    if resp:
+        log.info("📌 Pinned message %s", message_id)
+        return True
+    return False
+
+def delete_message(message_id: int) -> bool:
+    resp = tg("deleteMessage", chat_id=CHANNEL_ID, message_id=message_id)
+    if resp:
+        log.info("🗑️  Deleted message %s", message_id)
+        return True
+    return False
 
 # ── API fetcher ────────────────────────────────────────────────────────────────
 def fetch_latest() -> dict | None:
@@ -147,10 +170,30 @@ def fetch_latest() -> dict | None:
         log.warning("Fetch error: %s", e)
         return None
 
-# ── Polling loop (runs in background thread) ───────────────────────────────────
+# ── Promo loop ─────────────────────────────────────────────────────────────────
+def promo_loop():
+    """Every 30 minutes: send promo, pin it, delete the previous promo."""
+    log.info("📢 Promo loop started  |  interval=%sm", PROMO_INTERVAL // 60)
+    last_promo_id = None
+
+    while True:
+        time.sleep(PROMO_INTERVAL)
+
+        # Send new promo using HTML so the hyperlink works cleanly
+        text = '🎰 Play Crazy Time on <a href="https://roobet.com/?ref=aittam">Roobet</a>'
+        msg_id = send_message(text, parse_mode="HTML")
+
+        if msg_id:
+            pin_message(msg_id)
+            if last_promo_id:
+                delete_message(last_promo_id)
+            last_promo_id = msg_id
+
+# ── Polling loop ───────────────────────────────────────────────────────────────
 def polling_loop():
     log.info("🎰 Polling loop started  |  channel=%s  |  interval=%ss", CHANNEL_ID, POLL_INTERVAL)
     last_id = None
+
     while True:
         payload = fetch_latest()
         if payload:
@@ -159,7 +202,7 @@ def polling_loop():
                 log.info("🆕 New round: %s", game_id)
                 try:
                     msg = build_message(payload)
-                    if send_message(msg):
+                    if send_message(msg) is not None:
                         last_id = game_id
                 except Exception:
                     log.exception("Error processing payload")
@@ -167,7 +210,7 @@ def polling_loop():
                 log.debug("No new round (id=%s)", game_id)
         time.sleep(POLL_INTERVAL)
 
-# ── Health-check HTTP server (keeps Render Web Service alive) ──────────────────
+# ── Health-check HTTP server ───────────────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -176,7 +219,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"OK - Crazy Time bot is running")
 
     def log_message(self, format, *args):
-        pass   # silence HTTP access logs
+        pass  # silence access logs
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 def main():
@@ -185,14 +228,11 @@ def main():
     if not CHANNEL_ID:
         raise SystemExit("❌  Set TELEGRAM_CHANNEL_ID environment variable.")
 
-    # Start polling in a daemon thread
-    t = threading.Thread(target=polling_loop, daemon=True)
-    t.start()
+    threading.Thread(target=polling_loop, daemon=True).start()
+    threading.Thread(target=promo_loop,   daemon=True).start()
 
-    # Start HTTP server on main thread (Render requires a bound port)
     log.info("🌐 Health server listening on port %s", PORT)
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
 
 if __name__ == "__main__":
     main()
