@@ -4,10 +4,14 @@ Crazy Time Telegram Bot — Render-compatible (Flask + gunicorn)
 - Flask web server on main thread (Render detects port correctly via gunicorn)
 - Polling loop + promo loop run as background daemon threads
 - Pinger (cron-job.org or UptimeRobot) hits / every 14 min to prevent sleep
+- An atomic file lock guarantees the background loops start exactly once,
+  even if gunicorn imports this module more than once (master + worker(s)).
 """
 
 import os
+import sys
 import time
+import errno
 import logging
 import threading
 import requests
@@ -25,6 +29,7 @@ API_URL        = (
 POLL_INTERVAL  = 10        # seconds between API polls
 PROMO_INTERVAL = 30 * 60   # 30 minutes
 STATS_RETRY_DELAYS = [2, 3, 5]   # seconds to wait if totalWinners/totalAmount missing
+LOCK_PATH      = "/tmp/crazytime_bot_threads.lock"
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -244,14 +249,35 @@ def polling_loop():
                 log.debug("No new round (id=%s)", game_id)
         time.sleep(POLL_INTERVAL)
 
-# ── Start background threads before gunicorn forks ────────────────────────────
+# ── Start background threads — guaranteed exactly once ─────────────────────────
+def acquire_singleton_lock() -> bool:
+    """
+    Atomically create the lock file. Returns True if THIS process won the
+    race and should start the background loops; False if another process
+    (or an earlier import of this module) already holds it.
+    """
+    try:
+        fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            return False
+        raise
+
 def start_background_threads():
     if not BOT_TOKEN or not CHANNEL_ID:
         log.warning("⚠️  BOT_TOKEN or CHANNEL_ID not set — threads not started.")
         return
+
+    if not acquire_singleton_lock():
+        log.info("🔒 Background threads already running in another process (pid lock held) — skipping.")
+        return
+
     threading.Thread(target=polling_loop, daemon=True).start()
     threading.Thread(target=promo_loop,   daemon=True).start()
-    log.info("🚀 Background threads started.")
+    log.info("🚀 Background threads started (pid=%s).", os.getpid())
 
 start_background_threads()
 
