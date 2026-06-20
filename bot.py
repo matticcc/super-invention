@@ -224,12 +224,18 @@ def promo_loop():
 # ── Polling loop ───────────────────────────────────────────────────────────────
 def polling_loop():
     log.info("🎰 Polling loop started  |  channel=%s  |  interval=%ss", CHANNEL_ID, POLL_INTERVAL)
-    last_id = None
+    # The API sometimes returns recent rounds in a flip-flopping order (two
+    # rounds with very close settledAt timestamps swap "latest" position
+    # between polls). Tracking only the single last_id causes re-posts when
+    # that happens, so we remember a small window of recently-posted ids.
+    seen_ids = []
+    SEEN_WINDOW = 15
+
     while True:
         payload = fetch_latest()
         if payload:
             game_id = payload.get("id") or payload.get("transmissionId")
-            if game_id and game_id != last_id:
+            if game_id and game_id not in seen_ids:
                 log.info("🆕 New round: %s", game_id)
                 try:
                     # Give totalWinners/totalAmount a chance to populate if missing.
@@ -240,9 +246,14 @@ def polling_loop():
                         payload = fetch_latest_with_stats(game_id) or payload
 
                     actual_id = payload.get("id") or payload.get("transmissionId")
-                    msg = build_message(payload)
-                    if send_message(msg) is not None:
-                        last_id = actual_id
+                    if actual_id in seen_ids:
+                        log.debug("Round %s already posted (caught during stats retry).", actual_id)
+                    else:
+                        msg = build_message(payload)
+                        if send_message(msg) is not None:
+                            seen_ids.append(actual_id)
+                            if len(seen_ids) > SEEN_WINDOW:
+                                seen_ids.pop(0)
                 except Exception:
                     log.exception("Error processing payload")
             else:
