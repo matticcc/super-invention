@@ -103,6 +103,9 @@ def build_message(payload: dict) -> str:
     cash_hunt_max = result.get("cashHuntMaxMultiplier")
     is_cash_hunt  = wh_sector.lower().strip() == "cashhunt"
 
+    is_crazy_time = wh_sector.lower().strip() in ("crazytime", "crazybonus")
+    flapper       = wheel_res.get("bonus", {}).get("flapperResult", {})
+
     wh_label = label(wh_sector)
     ts_label = label(ts_sector)
     bonus    = is_bonus(wh_sector)
@@ -126,7 +129,19 @@ def build_message(payload: dict) -> str:
     if total_amount is not None:
         lines.append(f"• {b('Total amount:')} € {esc(fmt(total_amount))}")
 
-    if bonus and is_cash_hunt and cash_hunt_min and cash_hunt_max:
+    if bonus and is_crazy_time and flapper:
+        # Order: left → top → right (Green × Blue × Yellow in practice)
+        mults = []
+        for pos in ("left", "top", "right"):
+            section = flapper.get(pos, {})
+            m = section.get("bonusMultiplier")
+            if m is not None:
+                mults.append(str(m))
+        if mults:
+            lines.append(f"• {b('Multipliers:')} {esc('x'.join(mults))}x")
+        elif max_mult and max_mult > 1:
+            lines.append(f"• {b('Multiplier:')} {esc(str(max_mult))}x")
+    elif bonus and is_cash_hunt and cash_hunt_min and cash_hunt_max:
         lines.append(f"• {b('Multipliers:')} {esc(cash_hunt_min)}x-{esc(cash_hunt_max)}x")
     elif bonus and max_mult and max_mult > 1:
         lines.append(f"• {b('Multiplier:')} {esc(str(max_mult))}x")
