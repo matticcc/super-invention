@@ -94,6 +94,10 @@ def build_message(payload: dict) -> str:
     matched   = result.get("isTopSlotMatchedToWheelResult", False)
     max_mult  = result.get("maxMultiplier")
 
+    cash_hunt_min = result.get("cashHuntMinMultiplier")
+    cash_hunt_max = result.get("cashHuntMaxMultiplier")
+    is_cash_hunt  = wh_sector.lower().strip() == "cashhunt"
+
     wh_label = label(wh_sector)
     ts_label = label(ts_sector)
     bonus    = is_bonus(wh_sector)
@@ -116,7 +120,10 @@ def build_message(payload: dict) -> str:
         lines.append(f"• {b('Total winners:')} {esc(fmt(total_winners, 0))}")
     if total_amount is not None:
         lines.append(f"• {b('Total amount:')} € {esc(fmt(total_amount))}")
-    if bonus and max_mult and max_mult > 1:
+
+    if bonus and is_cash_hunt and cash_hunt_min and cash_hunt_max:
+        lines.append(f"• {b('Multipliers:')} {esc(cash_hunt_min)}x-{esc(cash_hunt_max)}x")
+    elif bonus and max_mult and max_mult > 1:
         lines.append(f"• {b('Multiplier:')} {esc(str(max_mult))}x")
 
     return "\n".join(lines)
