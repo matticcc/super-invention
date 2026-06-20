@@ -227,12 +227,17 @@ def polling_loop():
             if game_id and game_id != last_id:
                 log.info("🆕 New round: %s", game_id)
                 try:
-                    # Give totalWinners/totalAmount a chance to populate if missing
+                    # Give totalWinners/totalAmount a chance to populate if missing.
+                    # NOTE: by the time this returns, the "latest" round may have
+                    # moved on to a newer one — always trust the payload's own id,
+                    # not the id we originally started waiting for.
                     if payload.get("totalWinners") is None or payload.get("totalAmount") is None:
                         payload = fetch_latest_with_stats(game_id) or payload
+
+                    actual_id = payload.get("id") or payload.get("transmissionId")
                     msg = build_message(payload)
                     if send_message(msg) is not None:
-                        last_id = game_id
+                        last_id = actual_id
                 except Exception:
                     log.exception("Error processing payload")
             else:
